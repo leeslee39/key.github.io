@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>테마 타이머 모니터</title>
+  <style>
+    /* ... (스타일은 이전과 동일합니다) ... */
+    :root {
+      --bg: #f9fafb;
+      --fg: #111827;
+      --primary: #2563eb;
+      --danger: #dc2626;
+      font-family: Arial, "Pretendard", sans-serif;
+    }
+    body{background:var(--bg);color:var(--fg);margin:0;padding:1rem;}
+    h1{font-size:1.75rem;text-align:center;margin-bottom:1rem;}
+    .tabs{display:flex;justify-content:center;flex-wrap:wrap;gap:0.5rem;margin-bottom:1rem;}
+    .tabs button,.tabs input{font-size:0.9rem;}
+    .section{background:#fff;padding:1rem;border-radius:0.75rem;margin-bottom:1rem;box-shadow:0 2px 5px rgba(0,0,0,0.05);}
+    button{padding:0.5rem 0.8rem;margin:0.2rem;font-size:1rem;border:none;border-radius:0.5rem;background:var(--primary);color:#fff;cursor:pointer;}
+    button.danger{background:var(--danger);}
+    button.small{font-size:0.75rem;padding:0.3rem 0.5rem;}
+    input{padding:0.5rem;font-size:1rem;border:1px solid #d1d5db;border-radius:0.4rem;}
+    .timer-controls{display:flex;flex-wrap:wrap;gap:0.25rem;margin-top:0.3rem;}
+    #themeList{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1rem;}
+    .theme-card{border:1px solid #e5e7eb;border-radius:0.75rem;padding:1rem;background:white;display:flex;flex-direction:column;gap:0.3rem;}
+    .theme-row{display:flex;justify-content:space-between;flex-wrap:wrap;gap:0.5rem;}
+    .label{font-weight:bold;}
+    #themeForm{display:none;text-align:center;margin-bottom:1rem;}
+    #themeForm.show{display:block;}
+  </style>
+</head>
+<body>
+
+<h1>테마 타이머 모니터</h1>
+<div class="tabs">
+  <button onclick="toggleForm()">테마 등록 열기/닫기</button>
+  <button onclick="reload()">서버값 새로고침</button>
+</div>
+<div id="themeForm">
+  <input id="inpCode" placeholder="코드 입력" />
+  <button onclick="addTheme()">등록</button>
+  <div><span id="msg" style="color:var(--danger); font-weight:bold;"></span></div>
+</div>
+
+<div class="section" id="themeList"></div>
+
+<script>
+/* ────────────────────────────────────────────────────────
+   전역 상수/변수
+──────────────────────────────────────────────────────── */
+const GAS_URL         = "https://script.google.com/macros/s/AKfycbzoxH5bvqq5wjLOq-59r1Uc3J3wAuuycUExe9n6ynoPYkFAXkt_IUws3lfVFliOxr44/exec";
+const STORAGE_KEY     = "themes";
+const RESET_STORE_KEY = "staffResetDurations";
+
+let themes            = JSON.parse(localStorage.getItem(STORAGE_KEY)     || "[]");
+let staffResetDur     = JSON.parse(localStorage.getItem(RESET_STORE_KEY) || "{}");
+
+let timers            = {};
+let staffTimers       = {};
+let staffRunning      = {};
+let staffPausedRemain = {};
+let staffIsReset      = {};
+
+let audioCtx;
+let isAlarming = false; // 🔔 알람이 울리고 있는지 여부
+
+/* ────────────────────────────────────────────────────────
+   오디오 유틸 🔔 (수정된 섹션)
+──────────────────────────────────────────────────────── */
+// 오디오 컨텍스트 초기화
+function initAudio() {
+  if (!audioCtx) {
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    } catch (e) {
+      console.error("Audio context could not be created:", e);
+    }
+  }
+}
+
+// 알림음 재생 함수 (🔔 로직 전체 변경)
+function playAlertSound() {
+  // 🔔 이미 알람이 울리고 있거나, AudioContext 사용 불가 시 중단
+  if (isAlarming || (!window.AudioContext && !window.webkitAudioContext)) return; 
+  initAudio();
+  if (!audioCtx) return;
+
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  
+  isAlarming = true; // 🔔 알람 시작 (중복 방지)
+  
+  try {
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    oscillator.type = 'triangle'; // 'sine', 'square', 'sawtooth', 'triangle'
+    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5 (높은 '삐')
+
+    const now = audioCtx.currentTime;
+    const beepDuration = 0.1;   // 🔔 0.1초 "띠"
+    const beepInterval = 0.25;  // 🔔 0.25초 간격 (0.1초 울리고 0.15초 쉼)
+    const alarmDuration = 10.0; // 🔔 10초간 울림
+    
+    gainNode.gain.setValueAtTime(0, now); // 🔔 시작은 조용히
+    oscillator.start(now);
+
+    // 🔔 10초 동안 0.25초 간격으로 0.1초짜리 비프음을 예약
+    for (let t = 0; t < alarmDuration; t += beepInterval) {
+      gainNode.gain.setValueAtTime(0.3, now + t); // 🔔 0.3 볼륨으로 켜기
+      gainNode.gain.setValueAtTime(0,   now + t + beepDuration); // 🔔 0.1초 뒤 끄기
+    }
+    
+    // 🔔 10초 뒤에 오실레이터 완전 정지
+    oscillator.stop(now + alarmDuration);
+    
+    // 🔔 10초 뒤에 알람 상태 해제 (다시 울릴 수 있게)
+    setTimeout(() => {
+      isAlarming = false;
+    }, alarmDuration * 1000);
+
+  } catch (e) {
+    console.error("Audio playback failed:", e);
+    isAlarming = false; // 🔔 에러 나도 상태 해제
+  }
+}
+
+/* ────────────────────────────────────────────────────────
+   유틸
+──────────────────────────────────────────────────────── */
+// ... (secToHMS 등 다른 함수들은 이전과 동일합니다) ...
+const $list = document.getElementById("themeList");
+const saveThemes = () => localStorage.setItem(STORAGE_KEY,     JSON.stringify(themes));
+const saveResets = () => localStorage.setItem(RESET_STORE_KEY, JSON.stringify(staffResetDur));
+
+const secToHMS = s=>{
+  if(s<=0||!Number.isFinite(s)) return "00:00:00";
+  const h = String(Math.floor(s/3600)).padStart(2,"0");
+  const m = String(Math.floor((s%3600)/60)).padStart(2,"0");
+  const ss= String(s%60).padStart(2,"0");
+  return `${h}:${m}:${ss}`;
+};
+
+/* ────────────────────────────────────────────────────────
+   UI 제어
+──────────────────────────────────────────────────────── */
+function toggleForm(){ 
+  initAudio(); // 🔔
+  document.getElementById("themeForm").classList.toggle("show"); 
+}
+
+/* ────────────────────────────────────────────────────────
+   서버 fetch
+──────────────────────────────────────────────────────── */
+async function fetchThemeData(code){
+  return await (await fetch(`${GAS_URL}?order=gettimer&id=${encodeURIComponent(code)}`)).json();
+}
+
+/* ────────────────────────────────────────────────────────
+   테마 카드 렌더링
+──────────────────────────────────────────────────────── */
+function renderThemeRow(theme){
+  const div=document.createElement("div");
+  div.className="theme-card";
+  const hintDisplay=theme.hint===999?"0":theme.hint;
+  div.innerHTML=`
+    <div class="theme-row"><span class="label">이름:</span> ${theme.name||"-"}</div>
+    <div class="theme-row"><span class="label">코드:</span> ${theme.code}</div>
+    <div class="theme-row"><span class="label">남은시간:</span> <span id="remain_${theme.code}">계산중…</span></div>
+    <div class="theme-row"><span class="label">힌트 개수:</span> ${hintDisplay}</div>
+
+    <div class="theme-row">
+      <div>
+        <span class="label">직원 타이머:</span> <span id="staffTimer_${theme.code}">00:00:00</span>
+        <div class="timer-controls">
+          <button class="small" onclick="changeStaffTime('${theme.code}', -300)">-5분</button>
+          <button class="small" onclick="changeStaffTime('${theme.code}', -60)">-1분</button>
+          <button class="small" onclick="toggleStaffTimer('${theme.code}')">재개/정지</button>
+          <button class="small" onclick="changeStaffTime('${theme.code}',  60)">+1분</button>
+          <button class="small" onclick="changeStaffTime('${theme.code}', 300)">+5분</button>
+        </div>
+      </div>
+      <button class="danger small" onclick="resetStaffTimer('${theme.code}')">리셋</button>
+    </div>
+  `;
+  $list.appendChild(div);
+}
+
+/* ────────────────────────────────────────────────────────
+   처음/서버 새로고침
+──────────────────────────────────────────────────────── */
+async function reload(){
+  initAudio(); // 🔔 오디오 컨텍스트 활성화 시도
+  $list.innerHTML="";
+  await Promise.all(themes.map(async theme=>{
+    renderThemeRow(theme);
+    try{
+      const data=await fetchThemeData(theme.code);
+      if(data && data.state){
+        theme.name         = data.themname || "-";
+        theme.hint         = data.hint ?? 0;
+        timers[theme.code] = Number(data.timer);
+      }
+    }catch(e){console.error(e);}
+
+    if(staffResetDur[theme.code]==null){   // 기본 1h 설정
+      staffResetDur[theme.code]=3600;
+      saveResets();
+    }
+    staffIsReset[theme.code]=false;        // ★ 초기값
+  }));
+  saveThemes();
+}
+document.addEventListener("DOMContentLoaded",reload);
+
+/* ────────────────────────────────────────────────────────
+   주기적 화면 업데이트
+──────────────────────────────────────────────────────── */
+function updateTimers(){
+  const now=Math.floor(Date.now()/1000);
+  for(const theme of themes){
+    /* 메인 타이머 */
+    const mainExpiry = timers[theme.code]; // 🔔 만료 시각
+    const mainRemain = mainExpiry ? mainExpiry - now : 0;
+    const elMain=document.getElementById(`remain_${theme.code}`);
+    if(elMain) elMain.textContent=secToHMS(mainRemain);
+    
+    // 🔔 메인 타이머가 정확히 0초가 되었을 때
+    if(mainExpiry && mainExpiry === now){
+      playAlertSound();
+    }
+
+    /* 스태프 타이머 */
+    const elStaff=document.getElementById(`staffTimer_${theme.code}`);
+    if(!elStaff) continue;
+
+    let left;
+    if(staffRunning[theme.code]){
+      left=(staffTimers[theme.code]??now)-now;
+      if(left<=0){ 
+        staffRunning[theme.code]=false; 
+        left=0; 
+        playAlertSound(); // 🔔 스태프 타이머가 0초가 되었을 때
+      }
+      staffPausedRemain[theme.code]=left;
+    }else{
+      left=staffPausedRemain[theme.code]??staffResetDur[theme.code]??3600;
+    }
+    elStaff.textContent=secToHMS(left);
+  }
+}
+setInterval(updateTimers,1000);
+
+/* ────────────────────────────────────────────────────────
+   스태프 타이머 컨트롤
+──────────────────────────────────────────────────────── */
+// ... (이 아래의 스크립트 함수들은 이전과 동일합니다) ...
+function toggleStaffTimer(code){
+  initAudio(); // 🔔
+  const now=Math.floor(Date.now()/1000);
+  if(staffRunning[code]){                     /* ▶ 일시정지 */
+    const remain=(staffTimers[code]??now)-now;
+    staffPausedRemain[code]=Math.max(0,remain);
+    staffRunning[code]=false;
+    staffIsReset[code]=false;                 // ★ 단순 정지
+  }else{                                      /* ■ 재개 */
+    const remain=Math.max(0,staffPausedRemain[code]??staffResetDur[code]??3600);
+    staffTimers[code]=now+remain;
+    staffRunning[code]=true;
+    staffIsReset[code]=false;                 // ★ 리셋 모드 해제
+  }
+}
+
+function changeStaffTime(code,delta){
+  initAudio(); // 🔔
+  if(staffRunning[code]){                     /* 동작 중 → 만료 시각 조정 */
+    staffTimers[code]=(staffTimers[code]??Math.floor(Date.now()/1000))+delta;
+  }else{                                      /* 정지 또는 리셋 모드 */
+    const base=staffPausedRemain[code]??staffResetDur[code]??3600;
+    let newRemain=Math.max(0,base+delta);
+    staffPausedRemain[code]=newRemain;
+
+    if(staffIsReset[code]){                   // ★ “리셋 모드”에서만 저장
+      staffResetDur[code]=newRemain;
+      saveResets();
+    }
+  }
+}
+
+function resetStaffTimer(code){
+  initAudio(); // 🔔
+  const defaultSec=staffResetDur[code]??3600;
+  staffPausedRemain[code]=defaultSec;
+  staffRunning[code]=false;
+  staffIsReset[code]=true;                    // ★
+  delete staffTimers[code];
+
+  const el=document.getElementById(`staffTimer_${code}`);
+  if(el) el.textContent=secToHMS(defaultSec);
+}
+
+/* ────────────────────────────────────────────────────────
+   테마 추가
+──────────────────────────────────────────────────────── */
+function addTheme(){
+  initAudio(); // 🔔
+  const code=document.getElementById("inpCode").value.trim();
+  const msg =document.getElementById("msg");
+  if(!code) return msg.textContent="코드를 입력하세요";
+  if(themes.some(t=>t.code===code)) return msg.textContent="이미 등록됨";
+
+  themes.push({code,name:"-",hint:0});
+  staffResetDur[code]=3600;
+  staffIsReset[code]=false;
+  saveThemes(); saveResets();
+  reload();
+  document.getElementById("inpCode").value="";
+  msg.textContent="";
+}
+</script>
+
+</body>
+</html>
